@@ -2,7 +2,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from openai import OpenAI
 
 # load environment variables file
@@ -94,6 +94,97 @@ class TextSummarizer(TextProcessor):
         """
 
 
+class KeywordExtractor(TextProcessor):
+    """Handles keyword extraction from text using Hugging Face models."""
+    def __init__(self, api_key: str, base_url: str = "https://router.huggingface.co/v1"):
+        self.client = OpenAI(base_url=base_url, api_key=api_key)
+        self.available_models = {
+            "keyword_extraction": "meta-llama/Meta-Llama-3-70B-Instruct"
+        }
+    
+    def process(self, text: str, keyword_count: int = 5, model_type: str = "keyword_extraction") -> str:
+        """
+        Extract keywords from the input text.
+        
+        Args:
+            text: Input text to analyze
+            keyword_count: Number of keywords to extract (1-10)
+            model_type: Type of model to use for keyword extraction
+            
+        Returns:
+            Formatted keywords as string
+        """
+        try:
+            if not text or not text.strip():
+                raise ValueError("Input text cannot be empty")
+            # validate keyword count
+            if not 1 <= keyword_count <= 10:
+                raise ValueError("Keyword count must be between 1 and 10")
+            
+            if model_type not in self.available_models:
+                logger.warning(f"Model type {model_type} not found. Using default keyword extraction model.")
+                model_type = "keyword_extraction"
+            
+            model = self.available_models[model_type]
+            keywords = self._extract_keywords(text, keyword_count, model)
+            logger.info(f"Successfully extracted {keyword_count} keywords using {model}")
+            return keywords
+            
+        except Exception as e:
+            logger.error(f"Error in keyword extraction: {str(e)}")
+            return f"Error extracting keywords: {str(e)}"
+    
+    def _extract_keywords(self, text: str, keyword_count: int, model: str) -> str:
+        """Extract keywords using the specified model."""
+        truncated_text = self._truncate_text_if_needed(text)
+        prompt = self._create_keyword_extraction_prompt(truncated_text, keyword_count)
+        try:
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                temperature=0.2  # low temperature for consistent results
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logger.error(f"API call failed: {str(e)}")
+            raise
+    
+    def _truncate_text_if_needed(self, text: str, max_chars: int = 3000) -> str:
+        """Truncate text if it exceeds character limits."""
+        if len(text) > max_chars:
+            logger.warning(f"Text truncated from {len(text)} to {max_chars} characters for keyword extraction")
+            return text[:max_chars] + "..."
+        return text
+    
+    def _create_keyword_extraction_prompt(self, text: str, keyword_count: int) -> str:
+        """Create an effective prompt for keyword extraction."""
+        return f"""
+        Analyze the following text and extract exactly {keyword_count} most important keywords.
+        
+        REQUIREMENTS:
+        - Select {keyword_count} keywords that best represent the main concepts and topics
+        - Keywords should be specific, meaningful, and relevant to the text
+        - Focus on nouns, key concepts, and essential terminology
+        - Avoid very generic words unless they are central to the text
+        - Return the keywords in the exact format specified below
+        
+        TEXT:
+        {text}
+        
+        FORMAT YOUR RESPONSE EXACTLY LIKE THIS:
+        --- Extracted Keywords ---
+        1. [First Keyword]
+        2. [Second Keyword]
+        3. [Third Keyword]
+        ...continue for all {keyword_count} keywords...
+        
+        Do not include any additional text, explanations, or comments.
+        """
+
+
 class FileHandler:
     """Handles file operations for reading text files."""
     @staticmethod
@@ -155,6 +246,35 @@ class UserInputHandler:
         
         # validate file existence and extension
         return UserInputHandler._validate_file_path(file_path)
+    
+    @staticmethod
+    def get_keyword_count() -> int:
+        """
+        Get number of keywords to extract from user input with validation.
+        Continues prompting until valid input is provided.
+        
+        Returns:
+            Valid keyword count as integer (1-10)
+        """
+        while True:
+            print(f"\nHow many keywords would you like to extract? (1-10):")
+            user_input = input("Keyword count: ").strip()
+            # check if input is empty
+            if not user_input:
+                print("Please enter a number between 1 and 10.")
+                continue
+            
+            try:
+                keyword_count = int(user_input)
+            except ValueError:
+                print("Error: Keyword count must be a number. Please try again.")
+                continue
+            # validate range
+            if 1 <= keyword_count <= 10:
+                logger.info(f"Keyword count validated: {keyword_count}")
+                return keyword_count
+            else:
+                print("Error: Keyword count must be between 1 and 10. Please try again.")
     
     @staticmethod
     def _validate_file_path(file_path: str) -> str:
@@ -233,6 +353,46 @@ class SummaryService:
             }
 
 
+class KeywordService:
+    """Manages the keyword extraction process."""
+    def __init__(self, api_key: str):
+        self.file_handler = FileHandler()
+        self.keyword_extractor = KeywordExtractor(api_key)
+    def extract_keywords_from_file(self, file_path: str, keyword_count: int = 5, **kwargs) -> Dict[str, Any]:
+        """
+        Extract keywords from a text file.
+        
+        Args:
+            file_path: Path to the text file
+            keyword_count: Number of keywords to extract (1-10)
+            **kwargs: Additional arguments for keyword extraction
+            
+        Returns:
+            Dictionary containing keywords and metadata
+        """
+        try:
+            # read text from file
+            text_content = self.file_handler.read_text_file(file_path)
+            # extract keywords
+            keywords = self.keyword_extractor.process(text_content, keyword_count=keyword_count, **kwargs)
+            
+            return {
+                "success": True,
+                "original_text_length": len(text_content),
+                "keywords": keywords,
+                "keyword_count": keyword_count,
+                "file_path": file_path
+            }
+            
+        except Exception as e:
+            logger.error(f"Keyword extraction failed: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "file_path": file_path
+            }
+
+
 def display_welcome_message():
     """Display welcome message and program information."""
     print("=" * 60)
@@ -241,7 +401,7 @@ def display_welcome_message():
     print("This program will:")
     print("1. Read text from a file")
     print("2. Generate a concise summary")
-    print("3. Extract key keywords (coming soon)")
+    print("3. Extract key keywords")
     print("4. Create quiz questions (coming soon)")
     print("=" * 60)
 
@@ -267,27 +427,61 @@ def main():
         print(f"Unexpected error: {e}")
         return
     
-    # initialize summary service
+    # get keyword count from user with validation
+    try:
+        keyword_count = UserInputHandler.get_keyword_count()
+    except ValueError as e:
+        print(f"Input error: {e}")
+        return
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return
+    
+    # initialize services
     summary_service = SummaryService(api_key)
+    keyword_service = KeywordService(api_key)
     # generate summary
     print("\nGenerating summary... Please wait.")
-    result = summary_service.generate_summary_from_file(
+    summary_result = summary_service.generate_summary_from_file(
         file_path=file_path,
         model_type="summarization",
         max_length=150
     )
+    # extract keywords
+    print("\nExtracting keywords... Please wait.")
+    keyword_result = keyword_service.extract_keywords_from_file(
+        file_path=file_path,
+        keyword_count=keyword_count,
+        model_type="keyword_extraction"
+    )
     
     # display results
     print("\n" + "=" * 60)
-    if result["success"]:
+    
+    # Summary results
+    if summary_result["success"]:
         print("--- TEXT SUMMARY ---")
-        print(f"Original text length: {result['original_text_length']} characters")
-        print(f"File: {result['file_path']}")
-        print("-" * 60)
+        print(f"Original text length: {summary_result['original_text_length']} characters")
+        print(f"File: {summary_result['file_path']}")
+        print("-" * 40)
         print("SUMMARY:")
-        print(result["summary"])
+        print(summary_result["summary"])
     else:
-        print(f"ERROR: {result['error']}")
+        print(f"SUMMARY ERROR: {summary_result['error']}")
+    
+    print("\n" + "=" * 60)
+    
+    # Keyword results
+    if keyword_result["success"]:
+        print("--- EXTRACTED KEYWORDS ---")
+        print(f"Original text length: {keyword_result['original_text_length']} characters")
+        print(f"Requested keywords: {keyword_result['keyword_count']}")
+        print(f"File: {keyword_result['file_path']}")
+        print("-" * 40)
+        print(keyword_result["keywords"])
+    else:
+        print(f"KEYWORD EXTRACTION ERROR: {keyword_result['error']}")
+    
     print("=" * 60)
 
 
